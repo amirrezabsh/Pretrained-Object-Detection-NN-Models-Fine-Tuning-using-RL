@@ -179,6 +179,18 @@ class VOCDetectionDataset:
         return image, gt_boxes
 
 
+def _voc_dataset_exists(root: Path) -> bool:
+    """
+    Check if Pascal VOC 2007 files are present under the expected directory.
+    """
+
+    root = Path(root)
+    voc_root = root / "VOCdevkit" / "VOC2007"
+    annotations = voc_root / "Annotations"
+    images = voc_root / "JPEGImages"
+    return annotations.exists() and images.exists()
+
+
 def load_custom_dataset(
     image_dir: Path | str,
     label_dir: Optional[Path | str] = None,
@@ -220,13 +232,23 @@ def load_pascal_voc2007(
     limit : Optional[int]
         Cap the number of samples returned to keep experiments lightweight.
     download : bool
-        If True, let torchvision download VOC to `root` (requires network access).
+        Attempt to download VOC if it's missing. When True, a download is only
+        triggered if the dataset is not already present.
     """
 
+    root_path = Path(root)
+    dataset_exists = _voc_dataset_exists(root_path)
+    should_download = download and not dataset_exists
+
+    if not dataset_exists and not should_download:
+        raise FileNotFoundError(
+            f"Pascal VOC 2007 not found under {root_path}. Set download=True to fetch it automatically."
+        )
+
     return VOCDetectionDataset(
-        root=root,
+        root=root_path,
         image_set=image_set,
         year="2007",
-        download=download,
+        download=should_download,
         limit=limit,
     )
