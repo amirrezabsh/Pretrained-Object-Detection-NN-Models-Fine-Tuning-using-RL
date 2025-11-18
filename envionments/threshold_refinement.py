@@ -1,6 +1,6 @@
-import gym
+import gymnasium as gym
 import numpy as np
-from gym import spaces
+from gymnasium import spaces
 from ultralytics import YOLO
 from utility.metrics import compute_iou  # simple IoU helper
 
@@ -26,12 +26,14 @@ class ThresholdRefinementEnv(gym.Env):
         self.prev_reward = 0.0
         self.image_idx = 0
 
-    def reset(self):
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
         self.step_count = 0
         self.current_threshold = self.initial_threshold
         self.prev_reward = 0.0
         self.image_idx = np.random.randint(0, len(self.dataset))
-        return self._get_obs()
+        obs = self._get_obs()
+        return obs, {}
 
     def _get_obs(self):
         # Observe current threshold and mean confidence (for context)
@@ -55,7 +57,8 @@ class ThresholdRefinementEnv(gym.Env):
         delta = reward - self.prev_reward
         self.prev_reward = reward
 
-        done = (self.step_count >= self.max_steps) or (abs(delta) < 1e-4)
+        terminated = abs(delta) < 1e-4
+        truncated = self.step_count >= self.max_steps
         obs = self._get_obs()
-        return obs, delta, done, {}
+        return obs, delta, terminated, truncated, {}
 

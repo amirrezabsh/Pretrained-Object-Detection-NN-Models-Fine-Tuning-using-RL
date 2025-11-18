@@ -37,7 +37,7 @@ def evaluate_policy(
     stats: List[EpisodeStats] = []
 
     for ep in range(episodes):
-        obs = env.reset()
+        obs, _ = env.reset()
         thresholds = [float(obs[0])]
         done = False
         rewards = []
@@ -45,10 +45,11 @@ def evaluate_policy(
 
         while not done:
             action, _ = model.predict(obs, deterministic=deterministic)
-            obs, reward, done, _ = env.step(action)
+            obs, reward, terminated, truncated, _ = env.step(action)
             thresholds.append(float(obs[0]))
             rewards.append(float(reward))
             step += 1
+            done = terminated or truncated
 
         stats.append(
             EpisodeStats(

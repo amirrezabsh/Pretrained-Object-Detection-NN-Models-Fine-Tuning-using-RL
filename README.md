@@ -7,7 +7,7 @@ top of a frozen YOLOv8 model, maximizing IoU with ground-truth boxes.
 
 ## Repository Layout
 
-- `envionments/threshold_refinement.py` – OpenAI Gym environment that wraps a YOLO
+- `envionments/threshold_refinement.py` – Gymnasium environment that wraps a YOLO
   detector; actions adjust the confidence threshold and rewards are IoU deltas.
 - `utility/metrics.py` – IoU helper shared between the environment and evaluation.
 - `utility/dataset.py` – Loaders for YOLO-format datasets plus a torchvision-backed
@@ -24,7 +24,7 @@ top of a frozen YOLOv8 model, maximizing IoU with ground-truth boxes.
 1. **Create a virtual environment** (recommended) and install dependencies from
    the notebook’s first cell or manually:
    ```bash
-   pip install torch torchvision stable-baselines3 ultralytics gym numpy python-dotenv
+   pip install -r requirements.txt
    ```
 2. **Configure environment variables**:
    - Copy `.env.example` to `.env`.
@@ -66,4 +66,4 @@ custom dataset automatically.
   structure allows experimentation with other post-processing parameters or reward
   formulations.
 
-Feel free to adapt the notebook into Python scripts if you need automation or CI.*** End Patch
+Feel free to adapt the notebook into Python scripts if you need automation or CI.
