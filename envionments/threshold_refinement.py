@@ -35,10 +35,21 @@ class ThresholdRefinementEnv(gym.Env):
         obs = self._get_obs()
         return obs, {}
 
+    def _prepare_image(self, img: np.ndarray) -> np.ndarray:
+        """
+        Ultralytics expects uint8 images in [0, 255]. Our dataset provides
+        float32 in [0, 1], so convert when needed.
+        """
+
+        if img.dtype != np.uint8:
+            img = (img * 255).clip(0, 255).astype(np.uint8)
+        return img
+
     def _get_obs(self):
         # Observe current threshold and mean confidence (for context)
         img, _ = self.dataset[self.image_idx]
-        preds = self.model.predict(img, conf=self.current_threshold, verbose=False)[0]
+        img_input = self._prepare_image(img)
+        preds = self.model.predict(img_input, conf=self.current_threshold, verbose=False)[0]
         mean_conf = preds.boxes.conf.cpu().numpy().mean() if len(preds.boxes) else 0.0
         return np.array([self.current_threshold, mean_conf], dtype=np.float32)
 
@@ -47,7 +58,8 @@ class ThresholdRefinementEnv(gym.Env):
         self.current_threshold = np.clip(self.current_threshold + float(action[0]), 0.0, 1.0)
 
         img, gt_boxes = self.dataset[self.image_idx]
-        preds = self.model.predict(img, conf=self.current_threshold, verbose=False)[0]
+        img_input = self._prepare_image(img)
+        preds = self.model.predict(img_input, conf=self.current_threshold, verbose=False)[0]
         pred_boxes = preds.boxes.xyxy.cpu().numpy() if len(preds.boxes) else np.empty((0, 4))
 
         # Compute reward as mean IoU vs ground truth
@@ -57,7 +69,8 @@ class ThresholdRefinementEnv(gym.Env):
         delta = reward - self.prev_reward
         self.prev_reward = reward
 
-        terminated = abs(delta) < 1e-4
+        # Only stop early for vanishing improvement after the first step
+        terminated = (self.step_count > 1) and (abs(delta) < 1e-4)
         truncated = self.step_count >= self.max_steps
         obs = self._get_obs()
         return obs, delta, terminated, truncated, {}

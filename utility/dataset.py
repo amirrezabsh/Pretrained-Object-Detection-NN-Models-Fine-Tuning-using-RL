@@ -184,11 +184,26 @@ def _voc_dataset_exists(root: Path) -> bool:
     Check if Pascal VOC 2007 files are present under the expected directory.
     """
 
+    return _locate_voc_root(root) is not None
+
+
+def _locate_voc_root(root: Path) -> Optional[Path]:
+    """
+    Return the directory that directly contains VOCdevkit (if found), supporting
+    common archive extraction layouts.
+    """
+
     root = Path(root)
-    voc_root = root / "VOCdevkit" / "VOC2007"
-    annotations = voc_root / "Annotations"
-    images = voc_root / "JPEGImages"
-    return annotations.exists() and images.exists()
+    # Try common layouts: either directly under root/VOCdevkit or nested one level
+    # deeper (e.g., root/VOCtrainval_06-Nov-2007/VOCdevkit).
+    candidates = [root] + [p for p in root.glob("*") if p.is_dir()]
+    for candidate in candidates:
+        voc_root = candidate / "VOCdevkit" / "VOC2007"
+        annotations = voc_root / "Annotations"
+        images = voc_root / "JPEGImages"
+        if annotations.exists() and images.exists():
+            return candidate
+    return None
 
 
 def load_custom_dataset(
@@ -237,8 +252,10 @@ def load_pascal_voc2007(
     """
 
     root_path = Path(root)
-    dataset_exists = _voc_dataset_exists(root_path)
+    resolved_root = _locate_voc_root(root_path)
+    dataset_exists = resolved_root is not None
     should_download = download and not dataset_exists
+    target_root = resolved_root if resolved_root is not None else root_path
 
     if not dataset_exists and not should_download:
         raise FileNotFoundError(
@@ -246,7 +263,7 @@ def load_pascal_voc2007(
         )
 
     return VOCDetectionDataset(
-        root=root_path,
+        root=target_root,
         image_set=image_set,
         year="2007",
         download=should_download,
