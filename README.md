@@ -16,8 +16,22 @@ top of a frozen YOLOv8 model, maximizing IoU with ground-truth boxes.
   stats, and visualize threshold trajectories.
 - `main.ipynb` – End-to-end notebook for installing dependencies, loading data,
   training PPO, and evaluating the learned policy.
-- `.env` / `.env.example` – Environment variable configuration (dataset paths,
+- `.env` / `.env.example` - Environment variable configuration (dataset paths,
   RL hyperparameters).
+
+## Comparing RL vs baseline YOLO
+
+After training a PPO policy, you can compare it to the frozen YOLOv8 baseline:
+
+```bash
+python -m utility.model_comparison --model path/to/ppo_model.zip
+```
+
+This will:
+- Load the dataset from `.env` (custom YOLO-format if `IMAGE_DIR`/`LABEL_DIR` are set,
+  otherwise Pascal VOC 2007 with auto-download).
+- Evaluate the RL policy for `RL_EVAL_EPISODES` rollouts.
+- Sweep the baseline YOLO across fixed thresholds (0.3-0.7) and report the best mean IoU.
 
 ## Quick Start
 

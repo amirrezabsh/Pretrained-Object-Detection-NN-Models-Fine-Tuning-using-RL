@@ -21,6 +21,8 @@ class EpisodeStats:
     final_iou: float
     reward_sum: float
     thresholds: List[float]
+    ious: List[float]
+    rewards: List[float]
 
 
 def evaluate_policy(
@@ -41,6 +43,7 @@ def evaluate_policy(
         thresholds = [float(obs[0])]
         done = False
         rewards = []
+        ious = [float(env.prev_reward)]
         step = 0
 
         while not done:
@@ -48,6 +51,7 @@ def evaluate_policy(
             obs, reward, terminated, truncated, _ = env.step(action)
             thresholds.append(float(obs[0]))
             rewards.append(float(reward))
+            ious.append(float(env.prev_reward))
             step += 1
             done = terminated or truncated
 
@@ -58,6 +62,8 @@ def evaluate_policy(
                 final_iou=float(env.prev_reward),
                 reward_sum=float(np.sum(rewards)),
                 thresholds=thresholds,
+                ious=ious,
+                rewards=rewards,
             )
         )
 
@@ -102,5 +108,74 @@ def plot_threshold_trajectories(
     ax.set_ylim(0.0, 1.0)
     ax.set_title(title)
     ax.legend()
+    ax.grid(True, alpha=0.2)
+    return ax
+
+
+def plot_iou_trajectories(
+    stats: Sequence[EpisodeStats],
+    ax: plt.Axes | None = None,
+    title: str = "IoU trajectory per evaluation episode",
+) -> plt.Axes:
+    """
+    Visualize IoU progression over steps (absolute IoU, not deltas).
+    """
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 4))
+
+    for s in stats:
+        ax.plot(range(len(s.ious)), s.ious, marker="o", label=f"ep {s.episode}")
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("IoU")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.2)
+    return ax
+
+
+def plot_reward_trajectories(
+    stats: Sequence[EpisodeStats],
+    ax: plt.Axes | None = None,
+    title: str = "Reward (IoU delta) per step",
+) -> plt.Axes:
+    """
+    Plot reward deltas per step to see when improvements happen.
+    """
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 4))
+
+    for s in stats:
+        ax.plot(range(len(s.rewards)), s.rewards, marker="o", label=f"ep {s.episode}")
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Reward (delta IoU)")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.2)
+    return ax
+
+
+def plot_final_iou_histogram(
+    stats: Sequence[EpisodeStats],
+    ax: plt.Axes | None = None,
+    bins: int = 10,
+    title: str = "Final IoU distribution",
+) -> plt.Axes:
+    """
+    Histogram of per-episode final IoU to show spread/performance stability.
+    """
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 4))
+
+    final_ious = [s.final_iou for s in stats]
+    ax.hist(final_ious, bins=bins, range=(0, 1), color="steelblue", edgecolor="white")
+    ax.set_xlabel("Final IoU")
+    ax.set_ylabel("Count")
+    ax.set_title(title)
     ax.grid(True, alpha=0.2)
     return ax
