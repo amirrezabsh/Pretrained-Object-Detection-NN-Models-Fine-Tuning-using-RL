@@ -179,15 +179,15 @@ class VOCDetectionDataset:
         return image, gt_boxes
 
 
-def _voc_dataset_exists(root: Path) -> bool:
+def _voc_dataset_exists(root: Path, image_set: Optional[str] = None) -> bool:
     """
     Check if Pascal VOC 2007 files are present under the expected directory.
     """
 
-    return _locate_voc_root(root) is not None
+    return _locate_voc_root(root, image_set=image_set) is not None
 
 
-def _locate_voc_root(root: Path) -> Optional[Path]:
+def _locate_voc_root(root: Path, image_set: Optional[str] = None) -> Optional[Path]:
     """
     Return the directory that directly contains VOCdevkit (if found), supporting
     common archive extraction layouts.
@@ -196,12 +196,28 @@ def _locate_voc_root(root: Path) -> Optional[Path]:
     root = Path(root)
     # Try common layouts: either directly under root/VOCdevkit or nested one level
     # deeper (e.g., root/VOCtrainval_06-Nov-2007/VOCdevkit).
-    candidates = [root] + [p for p in root.glob("*") if p.is_dir()]
-    for candidate in candidates:
+    candidates = [root] + sorted([p for p in root.glob("*") if p.is_dir()])
+
+    def _candidate_valid(candidate: Path, require_split: bool) -> bool:
         voc_root = candidate / "VOCdevkit" / "VOC2007"
         annotations = voc_root / "Annotations"
         images = voc_root / "JPEGImages"
-        if annotations.exists() and images.exists():
+        if not (annotations.exists() and images.exists()):
+            return False
+        if require_split and image_set:
+            split_file = voc_root / "ImageSets" / "Main" / f"{image_set}.txt"
+            return split_file.exists()
+        return True
+
+    # Prefer candidates that include the requested split file to avoid picking the
+    # wrong archive (e.g., VOCtest when requesting trainval).
+    for candidate in candidates:
+        if _candidate_valid(candidate, require_split=True):
+            return candidate
+
+    # Fallback to any candidate with annotations/images if the specific split is missing.
+    for candidate in candidates:
+        if _candidate_valid(candidate, require_split=False):
             return candidate
     return None
 
@@ -252,7 +268,7 @@ def load_pascal_voc2007(
     """
 
     root_path = Path(root)
-    resolved_root = _locate_voc_root(root_path)
+    resolved_root = _locate_voc_root(root_path, image_set=image_set)
     dataset_exists = resolved_root is not None
     should_download = download and not dataset_exists
     target_root = resolved_root if resolved_root is not None else root_path

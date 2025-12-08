@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Iterable, List, Sequence
 
 import matplotlib.pyplot as plt
@@ -8,6 +9,8 @@ import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
 
 from envionments.threshold_refinement import ThresholdRefinementEnv
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -30,12 +33,14 @@ def evaluate_policy(
     dataset: Sequence,
     episodes: int = 5,
     deterministic: bool = True,
+    device=None,
+    detector_device=None,
 ) -> List[EpisodeStats]:
     """
     Roll out a trained RL policy and collect summary statistics.
     """
 
-    env = ThresholdRefinementEnv(dataset)
+    env = ThresholdRefinementEnv(dataset, device=device, detector_device=detector_device)
     stats: List[EpisodeStats] = []
 
     for ep in range(episodes):
@@ -79,13 +84,22 @@ def summarize_stats(stats: Iterable[EpisodeStats]) -> dict:
     reward_sums = np.array([s.reward_sum for s in stats], dtype=np.float32)
     steps = np.array([s.steps for s in stats], dtype=np.float32)
 
-    return {
+    summary = {
         "episodes": len(final_ious),
         "mean_final_iou": float(np.mean(final_ious)),
         "std_final_iou": float(np.std(final_ious)),
         "mean_return": float(np.mean(reward_sums)),
         "mean_steps": float(np.mean(steps)),
     }
+    logger.info(
+        "Evaluation summary: episodes=%d mean_final_iou=%.4f std_final_iou=%.4f mean_return=%.4f mean_steps=%.2f",
+        summary["episodes"],
+        summary["mean_final_iou"],
+        summary["std_final_iou"],
+        summary["mean_return"],
+        summary["mean_steps"],
+    )
+    return summary
 
 
 def plot_threshold_trajectories(

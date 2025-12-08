@@ -80,4 +80,14 @@ custom dataset automatically.
   structure allows experimentation with other post-processing parameters or reward
   formulations.
 
+### macOS Metal / MPS
+
+- PyTorch on Apple Silicon works best with an MPS build (standard pip wheels now include it). You can quickly check availability in a Python shell:
+  ```python
+  import torch
+  print(torch.backends.mps.is_available(), torch.backends.mps.is_built())
+  ```
+- The code automatically prefers `mps` -> `cuda` -> `cpu`. To force a device, export `TORCH_DEVICE` (e.g., `TORCH_DEVICE=cpu`).
+- Both the YOLO baseline and PPO policy load onto the selected device, and Ultralytics predictions explicitly run there.
+
 Feel free to adapt the notebook into Python scripts if you need automation or CI.
