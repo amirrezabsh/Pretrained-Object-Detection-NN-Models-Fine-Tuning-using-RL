@@ -116,6 +116,10 @@ def compare_models(
 
     logger.info("Running comparison on dataset=%s episodes=%d thresholds=%s", dataset_name, episodes, thresholds)
     rl_model = PPO.load(model_path, device=policy_device)
+    env_kwargs = {
+        "max_delta": float(os.getenv("RL_MAX_DELTA", "0.2")),
+        "max_steps": int(os.getenv("RL_MAX_STEPS", "15")),
+    }
     rl_stats: List[EpisodeStats] = evaluate_policy(
         model=rl_model,
         dataset=dataset,
@@ -123,6 +127,7 @@ def compare_models(
         deterministic=deterministic,
         device=policy_device,
         detector_device=detector_device,
+        env_kwargs=env_kwargs,
     )
     rl_summary = summarize_stats(rl_stats)
 
