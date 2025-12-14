@@ -14,21 +14,25 @@ logger = logging.getLogger(__name__)
 
 class ThresholdRefinementEnv(gym.Env):
     """
-    RL environment for iterative refinement of YOLO detection threshold.
+    RL environment for iterative refinement of detector post-processing knobs
+    (confidence threshold, NMS IoU, and max detections).
     """
     def __init__(
         self,
         dataset,
         initial_threshold: float = 0.5,
         initial_threshold_range: tuple[float, float] | None = None,
+        initial_nms_iou: float = 0.7,
+        max_det: int = 200,
         device=None,
         detector_device=None,
         feature_fn: Optional[Callable] = None,
         feature_dim: int | None = None,
         topk_conf: int = 5,
         max_delta: float = 0.2,
+        max_nms_delta: float = 0.1,
+        max_det_delta: int = 50,
         max_steps: int = 30,
-        action_mode: str = "delta",  # "delta" or "dir_mag"
         box_count_penalty: float = 0.05,
     ):
         super().__init__()
@@ -38,7 +42,8 @@ class ThresholdRefinementEnv(gym.Env):
             detector_device if detector_device is not None else self.device
         )
         self.max_delta = float(max_delta)
-        self.action_mode = action_mode
+        self.max_nms_delta = float(max_nms_delta)
+        self.max_det_delta = int(max_det_delta)
         self.box_count_penalty = float(box_count_penalty)
         self.topk_conf = max(0, int(topk_conf))
         self.model = YOLO("yolov8n.pt")  # pretrained detector
@@ -47,6 +52,10 @@ class ThresholdRefinementEnv(gym.Env):
         self.initial_threshold = initial_threshold
         self.initial_threshold_range = initial_threshold_range
         self.current_threshold = initial_threshold
+        self.initial_nms_iou = float(initial_nms_iou)
+        self.current_nms_iou = float(initial_nms_iou)
+        self.initial_max_det = int(max_det)
+        self.current_max_det = int(max_det)
         self.max_steps = int(max_steps)
         self.feature_fn = feature_fn  # optional callable(image, preds) -> 1D np.ndarray
         self.feature_dim = feature_dim
@@ -62,22 +71,14 @@ class ThresholdRefinementEnv(gym.Env):
                 self.feature_dim = 0
                 self.feature_fn = None
 
-        # Action space:
-        #   - "delta": single continuous delta in [-max_delta, +max_delta] (default)
-        #   - "dir_mag": direction in [-1, 1] and magnitude in [0, 1], scaled by max_delta
-        if self.action_mode == "dir_mag":
-            low = np.array([-1.0, 0.0], dtype=np.float32)
-            high = np.array([1.0, 1.0], dtype=np.float32)
-            self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
-        else:
-            self.action_mode = "delta"  # fallback to default
-            self.action_space = spaces.Box(
-                low=-self.max_delta, high=self.max_delta, shape=(1,), dtype=np.float32
-            )
+        # Fixed action space: three controls [threshold_delta, nms_delta, max_det_delta]
+        low = np.array([-self.max_delta, -self.max_nms_delta, -self.max_det_delta], dtype=np.float32)
+        high = np.array([self.max_delta, self.max_nms_delta, self.max_det_delta], dtype=np.float32)
+        self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
-        base_obs_dim = 6  # threshold + detection stats
+        base_obs_dim = 8  # threshold, nms_iou, max_det_norm + detection stats
         total_dim = base_obs_dim + self.topk_conf + (self.feature_dim or 0)
-        # Observation: [threshold, mean_conf, std_conf, count_norm, mean_area, mean_aspect, topk_conf...] + optional features
+        # Observation: [threshold, nms_iou, max_det_norm, mean_conf, std_conf, count_norm, mean_area, mean_aspect, topk_conf...] + optional features
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32)
 
         self.step_count = 0
@@ -92,6 +93,8 @@ class ThresholdRefinementEnv(gym.Env):
             self.current_threshold = float(np.clip(np.random.uniform(low, high), 0.0, 1.0))
         else:
             self.current_threshold = self.initial_threshold
+        self.current_nms_iou = float(np.clip(self.initial_nms_iou, 0.05, 0.99))
+        self.current_max_det = max(1, self.initial_max_det)
         self.prev_reward = 0.0
         if options and "image_idx" in options and options["image_idx"] is not None:
             self.image_idx = int(np.clip(options["image_idx"], 0, len(self.dataset) - 1))
@@ -118,6 +121,8 @@ class ThresholdRefinementEnv(gym.Env):
         preds = self.model.predict(
             img_input,
             conf=self.current_threshold,
+            iou=self.current_nms_iou,
+            max_det=int(self.current_max_det),
             device=self.detector_device,
             verbose=False,
         )[0]
@@ -147,6 +152,8 @@ class ThresholdRefinementEnv(gym.Env):
 
         obs_components = [
             self.current_threshold,
+            self.current_nms_iou,
+            float(self.current_max_det) / 500.0,  # simple normalization assuming typical caps <=500
             mean_conf,
             std_conf,
             count_norm,
@@ -203,20 +210,21 @@ class ThresholdRefinementEnv(gym.Env):
     def step(self, action):
         self.step_count += 1
         action = np.asarray(action, dtype=np.float32).flatten()
-        if self.action_mode == "dir_mag":
-            direction = float(np.clip(action[0], -1.0, 1.0))
-            magnitude = float(np.clip(action[1], 0.0, 1.0)) * self.max_delta
-            threshold_delta = direction * magnitude
-        else:
-            threshold_delta = float(np.clip(action[0], -self.max_delta, self.max_delta))
+        threshold_delta = float(np.clip(action[0], -self.max_delta, self.max_delta))
+        nms_delta = float(np.clip(action[1], -self.max_nms_delta, self.max_nms_delta)) if action.size > 1 else 0.0
+        det_delta = float(np.clip(action[2], -self.max_det_delta, self.max_det_delta)) if action.size > 2 else 0.0
 
         self.current_threshold = np.clip(self.current_threshold + threshold_delta, 0.0, 1.0)
+        self.current_nms_iou = float(np.clip(self.current_nms_iou + nms_delta, 0.05, 0.99))
+        self.current_max_det = int(np.clip(self.current_max_det + det_delta, 1, 2000))
 
         img, gt_boxes = self.dataset[self.image_idx]
         img_input = self._prepare_image(img)
         preds = self.model.predict(
             img_input,
             conf=self.current_threshold,
+            iou=self.current_nms_iou,
+            max_det=int(self.current_max_det),
             device=self.detector_device,
             verbose=False,
         )[0]
@@ -239,11 +247,16 @@ class ThresholdRefinementEnv(gym.Env):
         truncated = self.step_count >= self.max_steps
         obs = self._get_obs()
         logger.debug(
-            "Step %d: threshold=%.3f reward=%.4f threshold_delta=%.4f terminated=%s truncated=%s",
+            "Step %d: threshold=%.3f nms_iou=%.3f max_det=%d reward=%.4f "
+            "threshold_delta=%.4f nms_delta=%.4f det_delta=%.1f terminated=%s truncated=%s",
             self.step_count,
             self.current_threshold,
+            self.current_nms_iou,
+            int(self.current_max_det),
             reward,
             threshold_delta,
+            nms_delta,
+            det_delta,
             terminated,
             truncated,
         )
