@@ -248,6 +248,7 @@ def visualize_policy_vs_baseline(
     dataset: Sequence,
     sample_indices: Sequence[int] | None = None,
     baseline_threshold: float = 0.5,
+    baseline_nms_iou: float = 0.7,
     deterministic: bool = True,
     device=None,
     detector_device=None,
@@ -291,6 +292,8 @@ def visualize_policy_vs_baseline(
         rl_preds = env.model.predict(
             img_uint8,
             conf=float(env.current_threshold),
+            iou=float(getattr(env, "current_nms_iou", baseline_nms_iou)),
+            max_det=int(getattr(env, "current_max_det", 200)),
             device=detector_device,
             verbose=False,
         )[0]
@@ -300,6 +303,7 @@ def visualize_policy_vs_baseline(
         base_preds = baseline_model.predict(
             img_uint8,
             conf=float(baseline_threshold),
+            iou=float(baseline_nms_iou),
             device=detector_device,
             verbose=False,
         )[0]
@@ -357,6 +361,8 @@ def plot_detection_count_accuracy(
     stats: Sequence[EpisodeStats],
     dataset: Sequence,
     baseline_threshold: float = 0.5,
+    baseline_nms_iou: float = 0.7,
+    rl_nms_iou: float | None = None,
     detector_device=None,
     ax: plt.Axes | None = None,
     title: str = "Detection-count accuracy vs baseline",
@@ -386,8 +392,20 @@ def plot_detection_count_accuracy(
         denom = max(gt_count, 1)  # avoid div-by-zero
 
         rl_threshold = float(s.thresholds[-1]) if s.thresholds else baseline_threshold
-        rl_preds = model.predict(img_uint8, conf=rl_threshold, device=detector_device, verbose=False)[0]
-        base_preds = model.predict(img_uint8, conf=float(baseline_threshold), device=detector_device, verbose=False)[0]
+        rl_preds = model.predict(
+            img_uint8,
+            conf=rl_threshold,
+            iou=float(rl_nms_iou if rl_nms_iou is not None else baseline_nms_iou),
+            device=detector_device,
+            verbose=False,
+        )[0]
+        base_preds = model.predict(
+            img_uint8,
+            conf=float(baseline_threshold),
+            iou=float(baseline_nms_iou),
+            device=detector_device,
+            verbose=False,
+        )[0]
 
         rl_count = len(rl_preds.boxes)
         base_count = len(base_preds.boxes)
