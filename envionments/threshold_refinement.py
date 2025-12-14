@@ -33,6 +33,8 @@ class ThresholdRefinementEnv(gym.Env):
         max_nms_delta: float = 0.1,
         max_det_delta: int = 50,
         max_steps: int = 30,
+        duplicate_penalty: float = 0.05,
+        duplicate_iou_threshold: float = 0.8,
         box_count_penalty: float = 0.05,
     ):
         super().__init__()
@@ -44,6 +46,8 @@ class ThresholdRefinementEnv(gym.Env):
         self.max_delta = float(max_delta)
         self.max_nms_delta = float(max_nms_delta)
         self.max_det_delta = int(max_det_delta)
+        self.duplicate_penalty = float(duplicate_penalty)
+        self.duplicate_iou_threshold = float(duplicate_iou_threshold)
         self.box_count_penalty = float(box_count_penalty)
         self.topk_conf = max(0, int(topk_conf))
         self.model = YOLO("yolov8n.pt")  # pretrained detector
@@ -238,6 +242,15 @@ class ThresholdRefinementEnv(gym.Env):
             count_gap = abs(pred_count - gt_count)
             norm = max(gt_count, 1)
             reward -= self.box_count_penalty * (count_gap / norm)
+        if self.duplicate_penalty > 0 and len(pred_boxes) > 1:
+            dup_pairs = 0
+            for i in range(len(pred_boxes)):
+                for j in range(i + 1, len(pred_boxes)):
+                    iou_pair = compute_iou(pred_boxes[i : i + 1], pred_boxes[j : j + 1])
+                    if iou_pair >= self.duplicate_iou_threshold:
+                        dup_pairs += 1
+            if dup_pairs:
+                reward -= self.duplicate_penalty * dup_pairs
 
         # Absolute IoU reward for a stronger learning signal
         self.prev_reward = reward
