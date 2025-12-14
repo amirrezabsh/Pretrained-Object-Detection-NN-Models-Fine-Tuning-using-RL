@@ -27,6 +27,8 @@ class EpisodeStats:
     final_iou: float
     reward_sum: float
     thresholds: List[float]
+    nms_ious: List[float]
+    max_dets: List[int]
     ious: List[float]
     rewards: List[float]
     image_idx: int | None = None
@@ -52,6 +54,8 @@ def evaluate_policy(
     for ep in range(episodes):
         obs, _ = env.reset()
         thresholds = [float(obs[0])]
+        nms_ious = [float(getattr(env, "current_nms_iou", 0.0))]
+        max_dets = [int(getattr(env, "current_max_det", 0))]
         done = False
         rewards = []
         ious = [float(env.prev_reward)]
@@ -61,6 +65,8 @@ def evaluate_policy(
             action, _ = model.predict(obs, deterministic=deterministic)
             obs, reward, terminated, truncated, _ = env.step(action)
             thresholds.append(float(obs[0]))
+            nms_ious.append(float(getattr(env, "current_nms_iou", nms_ious[-1])))
+            max_dets.append(int(getattr(env, "current_max_det", max_dets[-1])))
             rewards.append(float(reward))
             ious.append(float(env.prev_reward))
             step += 1
@@ -73,6 +79,8 @@ def evaluate_policy(
                 final_iou=float(env.prev_reward),
                 reward_sum=float(np.sum(rewards)),
                 thresholds=thresholds,
+                nms_ious=nms_ious,
+                max_dets=max_dets,
                 ious=ious,
                 rewards=rewards,
                 image_idx=int(getattr(env, "image_idx", -1)),
@@ -160,6 +168,53 @@ def plot_threshold_trajectories(
     ax.set_xlabel("Step")
     ax.set_ylabel("Confidence threshold")
     ax.set_ylim(0.0, 1.0)
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.2)
+    return ax
+
+
+def plot_nms_trajectories(
+    stats: Sequence[EpisodeStats],
+    ax: plt.Axes | None = None,
+    title: str = "NMS IoU trajectory per evaluation episode",
+) -> plt.Axes:
+    """
+    Visualize how NMS IoU is adjusted over timesteps.
+    """
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 4))
+
+    for s in stats:
+        ax.plot(range(len(s.nms_ious)), s.nms_ious, marker="o", label=f"ep {s.episode}")
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("NMS IoU")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.2)
+    return ax
+
+
+def plot_max_det_trajectories(
+    stats: Sequence[EpisodeStats],
+    ax: plt.Axes | None = None,
+    title: str = "Max detections trajectory per evaluation episode",
+) -> plt.Axes:
+    """
+    Visualize how the max_detections cap is adjusted over timesteps.
+    """
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 4))
+
+    for s in stats:
+        ax.plot(range(len(s.max_dets)), s.max_dets, marker="o", label=f"ep {s.episode}")
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Max detections")
     ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.2)
@@ -362,7 +417,9 @@ def plot_detection_count_accuracy(
     dataset: Sequence,
     baseline_threshold: float = 0.5,
     baseline_nms_iou: float = 0.7,
+    baseline_max_det: int = 200,
     rl_nms_iou: float | None = None,
+    rl_max_det: int | None = None,
     detector_device=None,
     ax: plt.Axes | None = None,
     title: str = "Detection-count accuracy vs baseline",
@@ -392,10 +449,14 @@ def plot_detection_count_accuracy(
         denom = max(gt_count, 1)  # avoid div-by-zero
 
         rl_threshold = float(s.thresholds[-1]) if s.thresholds else baseline_threshold
+        # Prefer per-episode settings if provided
+        rl_nms = float(rl_nms_iou if rl_nms_iou is not None else (s.nms_ious[-1] if s.nms_ious else baseline_nms_iou))
+        rl_max = int(rl_max_det if rl_max_det is not None else (s.max_dets[-1] if s.max_dets else baseline_max_det))
         rl_preds = model.predict(
             img_uint8,
             conf=rl_threshold,
-            iou=float(rl_nms_iou if rl_nms_iou is not None else baseline_nms_iou),
+            iou=rl_nms,
+            max_det=rl_max,
             device=detector_device,
             verbose=False,
         )[0]
@@ -403,6 +464,7 @@ def plot_detection_count_accuracy(
             img_uint8,
             conf=float(baseline_threshold),
             iou=float(baseline_nms_iou),
+            max_det=int(baseline_max_det),
             device=detector_device,
             verbose=False,
         )[0]
