@@ -34,3 +34,4 @@ rl_threshold_tuner*
 # IDE/system files
 .DS_Store
 Thumbs.db
+outputs/
