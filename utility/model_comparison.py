@@ -20,7 +20,13 @@ from stable_baselines3 import PPO
 from ultralytics import YOLO
 
 from utility.dataset import load_custom_dataset, load_pascal_voc2007
-from utility.evaluation import EpisodeStats, evaluate_policy, summarize_stats
+from utility.evaluation import (
+    EpisodeStats,
+    compute_detection_count_accuracy,
+    evaluate_baseline_detection_metrics,
+    evaluate_policy,
+    summarize_stats,
+)
 from utility.logging_utils import setup_logging
 from utility.metrics import compute_iou
 from utility.torch_utils import get_default_device
@@ -61,6 +67,7 @@ def _evaluate_baseline(
     device,
     max_det: int = 200,
     nms_iou: float = 0.7,
+    verbose: bool = False,
 ) -> dict:
     """
     Evaluate the frozen YOLO model over a set of fixed confidence thresholds.
@@ -80,7 +87,7 @@ def _evaluate_baseline(
                 device=device,
                 max_det=max_det,
                 iou=nms_iou,
-                verbose=True,
+                verbose=verbose,
             )[0]
             pred_boxes = preds.boxes.xyxy.cpu().numpy() if len(preds.boxes) else np.empty((0, 4))
             ious.append(float(compute_iou(pred_boxes, gt_boxes)))
@@ -111,6 +118,11 @@ def compare_models(
     if thresholds is None:
         thresholds = (0.3, 0.4, 0.5, 0.6, 0.7)
 
+    if dataset_limit is None:
+        # Prefer COMPARE_DATA_LIMIT for evaluation sweeps; fall back to RL_DATA_LIMIT.
+        dataset_limit_env = os.getenv("COMPARE_DATA_LIMIT") or os.getenv("RL_DATA_LIMIT")
+        dataset_limit = int(dataset_limit_env) if dataset_limit_env else None
+
     dataset, dataset_name = _prepare_dataset(limit_override=dataset_limit)
     episodes = episodes or int(os.getenv("RL_EVAL_EPISODES", "5"))
 
@@ -119,6 +131,9 @@ def compare_models(
     env_kwargs = {
         "max_delta": float(os.getenv("RL_MAX_DELTA", "0.2")),
         "max_steps": int(os.getenv("RL_MAX_STEPS", "15")),
+        "reward_scale": float(os.getenv("RL_REWARD_SCALE", "1.0")),
+        "max_det": max_det,
+        "initial_nms_iou": nms_iou,
     }
     rl_stats: List[EpisodeStats] = evaluate_policy(
         model=rl_model,
@@ -130,6 +145,14 @@ def compare_models(
         env_kwargs=env_kwargs,
     )
     rl_summary = summarize_stats(rl_stats)
+    rl_meta = {
+        "per_episode_thresholds": [float(s.thresholds[-1]) for s in rl_stats],
+        "per_episode_nms_iou": [float(s.nms_ious[-1]) for s in rl_stats],
+        "per_episode_max_det": [int(s.max_det) for s in rl_stats if s.max_det is not None],
+        "mean_final_threshold": rl_summary.get("mean_final_threshold", None),
+        "mean_final_nms_iou": rl_summary.get("mean_final_nms_iou", None),
+        "max_det": max_det,
+    }
 
     baseline = _evaluate_baseline(
         dataset,
@@ -137,8 +160,32 @@ def compare_models(
         device=detector_device,
         max_det=max_det,
         nms_iou=nms_iou,
+        verbose=False,
     )
     best_baseline = baseline["best"]
+    baseline_threshold = float(best_baseline["threshold"]) if best_baseline.get("threshold") is not None else 0.5
+    baseline_metrics = evaluate_baseline_detection_metrics(
+        stats=rl_stats,
+        dataset=dataset,
+        baseline_threshold=baseline_threshold,
+        baseline_nms_iou=nms_iou,
+        baseline_max_det=max_det,
+        detector_device=detector_device,
+    )
+    count_accuracy = compute_detection_count_accuracy(
+        stats=rl_stats,
+        dataset=dataset,
+        baseline_threshold=baseline_threshold,
+        baseline_nms_iou=nms_iou,
+        baseline_max_det=max_det,
+        detector_device=detector_device,
+    )
+    baseline_meta = {
+        "nms_iou": nms_iou,
+        "max_det": max_det,
+        "thresholds_evaluated": list(thresholds),
+        "best_threshold": baseline_threshold,
+    }
 
     improvement = rl_summary["mean_final_iou"] - best_baseline["mean_iou"]
 
@@ -146,7 +193,11 @@ def compare_models(
         "dataset": dataset_name,
         "episodes": episodes,
         "rl": rl_summary,
+        "rl_meta": rl_meta,
         "baseline": baseline,
+        "baseline_detection_metrics": baseline_metrics,
+        "baseline_meta": baseline_meta,
+        "detection_count_accuracy": count_accuracy,
         "improvement_over_best_baseline": float(improvement),
     }
 
@@ -163,6 +214,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--episodes", type=int, default=None, help="Number of RL evaluation episodes.")
     parser.add_argument("--stochastic", action="store_true", help="Use stochastic policy actions during evaluation.")
+    parser.add_argument("--dataset-limit", type=int, default=None, help="Limit number of samples used for comparison.")
     return parser.parse_args()
 
 
@@ -174,15 +226,19 @@ def main() -> None:
         thresholds=args.thresholds,
         episodes=args.episodes,
         deterministic=not args.stochastic,
-        dataset_limit=None,
+        dataset_limit=args.dataset_limit,
     )
     # Lightweight text output; relying on CLI styling for readability.
     print("Dataset:", results["dataset"])
     print("Episodes:", results["episodes"])
     print("RL mean_final_iou:", results["rl"]["mean_final_iou"])
     print("RL std_final_iou:", results["rl"]["std_final_iou"])
+    print("RL mean_final_threshold:", results["rl_meta"].get("mean_final_threshold"))
+    print("RL mean_final_nms_iou:", results["rl_meta"].get("mean_final_nms_iou"))
     print("Best baseline threshold:", results["baseline"]["best"]["threshold"])
     print("Best baseline mean_iou:", results["baseline"]["best"]["mean_iou"])
+    print("Baseline nms_iou:", results["baseline_meta"]["nms_iou"])
+    print("Baseline max_det:", results["baseline_meta"]["max_det"])
     print("Improvement over best baseline:", results["improvement_over_best_baseline"])
     print("Per-threshold baseline results:")
     for row in results["baseline"]["per_threshold"]:
