@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class ThresholdRefinementEnv(gym.Env):
     """
     RL environment for iterative refinement of detector post-processing knobs
-    (confidence threshold, NMS IoU, and max detections).
+    (confidence threshold and NMS IoU).
     """
     def __init__(
         self,
@@ -31,11 +31,13 @@ class ThresholdRefinementEnv(gym.Env):
         topk_conf: int = 5,
         max_delta: float = 0.2,
         max_nms_delta: float = 0.1,
-        max_det_delta: int = 50,
         max_steps: int = 30,
+        reward_scale: float = 1.0,
         duplicate_penalty: float = 0.05,
         duplicate_iou_threshold: float = 0.8,
         box_count_penalty: float = 0.05,
+        fbeta: float = 2.0,
+        fn_penalty: float = 0.0,
     ):
         super().__init__()
         # PPO/policy device (used by SB3); detector can live on a separate device.
@@ -45,7 +47,6 @@ class ThresholdRefinementEnv(gym.Env):
         )
         self.max_delta = float(max_delta)
         self.max_nms_delta = float(max_nms_delta)
-        self.max_det_delta = int(max_det_delta)
         self.duplicate_penalty = float(duplicate_penalty)
         self.duplicate_iou_threshold = float(duplicate_iou_threshold)
         self.box_count_penalty = float(box_count_penalty)
@@ -63,6 +64,9 @@ class ThresholdRefinementEnv(gym.Env):
         self.max_steps = int(max_steps)
         self.feature_fn = feature_fn  # optional callable(image, preds) -> 1D np.ndarray
         self.feature_dim = feature_dim
+        self.reward_scale = float(reward_scale)
+        self.fbeta = float(fbeta)
+        self.fn_penalty = float(fn_penalty)
 
         # If no custom feature_fn provided, default to backbone GAP embedding.
         if self.feature_fn is None:
@@ -75,18 +79,22 @@ class ThresholdRefinementEnv(gym.Env):
                 self.feature_dim = 0
                 self.feature_fn = None
 
-        # Fixed action space: three controls [threshold_delta, nms_delta, max_det_delta]
-        low = np.array([-self.max_delta, -self.max_nms_delta, -self.max_det_delta], dtype=np.float32)
-        high = np.array([self.max_delta, self.max_nms_delta, self.max_det_delta], dtype=np.float32)
+        # Fixed action space: two controls [threshold_delta, nms_delta]
+        low = np.array([-self.max_delta, -self.max_nms_delta], dtype=np.float32)
+        high = np.array([self.max_delta, self.max_nms_delta], dtype=np.float32)
         self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
-        base_obs_dim = 8  # threshold, nms_iou, max_det_norm + detection stats
+        base_obs_dim = 7  # threshold, nms_iou + detection stats
         total_dim = base_obs_dim + self.topk_conf + (self.feature_dim or 0)
-        # Observation: [threshold, nms_iou, max_det_norm, mean_conf, std_conf, count_norm, mean_area, mean_aspect, topk_conf...] + optional features
+        # Observation: [threshold, nms_iou, mean_conf, std_conf, count_norm, mean_area, mean_aspect, topk_conf...] + optional features
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32)
 
         self.step_count = 0
         self.prev_reward = 0.0
+        self.last_precision = 0.0
+        self.last_recall = 0.0
+        self.last_f1 = 0.0
+        self.last_matched_iou = 0.0
         self.image_idx = 0
 
     def reset(self, *, seed=None, options=None):
@@ -100,6 +108,10 @@ class ThresholdRefinementEnv(gym.Env):
         self.current_nms_iou = float(np.clip(self.initial_nms_iou, 0.05, 0.99))
         self.current_max_det = max(1, self.initial_max_det)
         self.prev_reward = 0.0
+        self.last_precision = 0.0
+        self.last_recall = 0.0
+        self.last_f1 = 0.0
+        self.last_matched_iou = 0.0
         if options and "image_idx" in options and options["image_idx"] is not None:
             self.image_idx = int(np.clip(options["image_idx"], 0, len(self.dataset) - 1))
         else:
@@ -157,7 +169,6 @@ class ThresholdRefinementEnv(gym.Env):
         obs_components = [
             self.current_threshold,
             self.current_nms_iou,
-            float(self.current_max_det) / 500.0,  # simple normalization assuming typical caps <=500
             mean_conf,
             std_conf,
             count_norm,
@@ -211,16 +222,65 @@ class ThresholdRefinementEnv(gym.Env):
             pooled = torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).flatten()
             return pooled.detach().cpu().numpy()
 
+    def _pairwise_iou(self, boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
+        """
+        Compute pairwise IoU between two sets of boxes (xyxy).
+        """
+
+        if boxes_a.size == 0 or boxes_b.size == 0:
+            return np.zeros((len(boxes_a), len(boxes_b)), dtype=np.float32)
+
+        ious = np.zeros((len(boxes_a), len(boxes_b)), dtype=np.float32)
+        for i, (x1, y1, x2, y2) in enumerate(boxes_a):
+            for j, (gx1, gy1, gx2, gy2) in enumerate(boxes_b):
+                inter_x1 = max(x1, gx1)
+                inter_y1 = max(y1, gy1)
+                inter_x2 = min(x2, gx2)
+                inter_y2 = min(y2, gy2)
+                inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+                union_area = (x2 - x1) * (y2 - y1) + (gx2 - gx1) * (gy2 - gy1) - inter_area
+                if union_area > 0:
+                    ious[i, j] = inter_area / union_area
+        return ious
+
+    def _match_boxes(
+        self,
+        pred_boxes: np.ndarray,
+        gt_boxes: np.ndarray,
+        iou_threshold: float,
+    ) -> tuple[list[float], int, int, int]:
+        """
+        Greedy matching between predictions and GT using IoU threshold.
+        Returns matched IoUs plus tp/fp/fn counts.
+        """
+
+        if len(pred_boxes) == 0 or len(gt_boxes) == 0:
+            return [], 0, len(pred_boxes), len(gt_boxes)
+
+        ious = self._pairwise_iou(pred_boxes, gt_boxes)
+        matched_ious: list[float] = []
+        while True:
+            max_idx = np.unravel_index(int(np.argmax(ious)), ious.shape)
+            max_iou = float(ious[max_idx])
+            if max_iou < iou_threshold:
+                break
+            matched_ious.append(max_iou)
+            ious[max_idx[0], :] = -1.0
+            ious[:, max_idx[1]] = -1.0
+
+        tp = len(matched_ious)
+        fp = len(pred_boxes) - tp
+        fn = len(gt_boxes) - tp
+        return matched_ious, tp, fp, fn
+
     def step(self, action):
         self.step_count += 1
         action = np.asarray(action, dtype=np.float32).flatten()
         threshold_delta = float(np.clip(action[0], -self.max_delta, self.max_delta))
         nms_delta = float(np.clip(action[1], -self.max_nms_delta, self.max_nms_delta)) if action.size > 1 else 0.0
-        det_delta = float(np.clip(action[2], -self.max_det_delta, self.max_det_delta)) if action.size > 2 else 0.0
 
         self.current_threshold = np.clip(self.current_threshold + threshold_delta, 0.0, 1.0)
         self.current_nms_iou = float(np.clip(self.current_nms_iou + nms_delta, 0.05, 0.99))
-        self.current_max_det = int(np.clip(self.current_max_det + det_delta, 1, 2000))
 
         img, gt_boxes = self.dataset[self.image_idx]
         img_input = self._prepare_image(img)
@@ -234,11 +294,33 @@ class ThresholdRefinementEnv(gym.Env):
         )[0]
         pred_boxes = preds.boxes.xyxy.cpu().numpy() if len(preds.boxes) else np.empty((0, 4))
 
-        # Compute reward as mean IoU vs ground truth with a small penalty for box count mismatch
-        reward = compute_iou(pred_boxes, gt_boxes)
+        # Compute reward using matched IoU * F-beta to balance accuracy and count (beta>1 favors recall).
+        if len(gt_boxes) == 0 and len(pred_boxes) == 0:
+            mean_iou = 1.0
+            precision = 1.0
+            recall = 1.0
+            fbeta = 1.0
+            fn = 0
+            gt_count = 0
+        else:
+            matched_ious, tp, fp, fn = self._match_boxes(
+                pred_boxes,
+                gt_boxes,
+                iou_threshold=float(self.current_nms_iou),
+            )
+            mean_iou = float(np.mean(matched_ious)) if matched_ious else 0.0
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            beta2 = self.fbeta ** 2
+            denom = (beta2 * precision + recall)
+            fbeta = ((1.0 + beta2) * precision * recall / denom) if denom > 0 else 0.0
+            gt_count = len(gt_boxes)
+
+        reward = mean_iou * fbeta
+        if self.fn_penalty > 0 and gt_count > 0:
+            reward -= self.fn_penalty * (fn / gt_count)
         if self.box_count_penalty > 0:
             pred_count = len(pred_boxes)
-            gt_count = len(gt_boxes)
             count_gap = abs(pred_count - gt_count)
             norm = max(gt_count, 1)
             reward -= self.box_count_penalty * (count_gap / norm)
@@ -252,6 +334,11 @@ class ThresholdRefinementEnv(gym.Env):
             if dup_pairs:
                 reward -= self.duplicate_penalty * dup_pairs
 
+        reward *= self.reward_scale
+        self.last_precision = float(precision)
+        self.last_recall = float(recall)
+        self.last_f1 = float(fbeta)
+        self.last_matched_iou = float(mean_iou)
         # Absolute IoU reward for a stronger learning signal
         self.prev_reward = reward
 
@@ -261,7 +348,7 @@ class ThresholdRefinementEnv(gym.Env):
         obs = self._get_obs()
         logger.debug(
             "Step %d: threshold=%.3f nms_iou=%.3f max_det=%d reward=%.4f "
-            "threshold_delta=%.4f nms_delta=%.4f det_delta=%.1f terminated=%s truncated=%s",
+            "threshold_delta=%.4f nms_delta=%.4f terminated=%s truncated=%s",
             self.step_count,
             self.current_threshold,
             self.current_nms_iou,
@@ -269,7 +356,6 @@ class ThresholdRefinementEnv(gym.Env):
             reward,
             threshold_delta,
             nms_delta,
-            det_delta,
             terminated,
             truncated,
         )
