@@ -157,8 +157,10 @@ class VOCDetectionDataset:
         return length
 
     def __getitem__(self, idx: int) -> Tuple[np.ndarray, np.ndarray]:
-        if self.limit is not None:
-            idx = min(idx, self.limit - 1)
+        length = len(self)
+        if idx < 0 or idx >= length:
+            raise IndexError(f"Index {idx} out of range for VOCDetectionDataset of length {length}")
+
         image_pil, target = self.dataset[idx]
         image = np.asarray(image_pil).astype(np.float32) / 255.0
 
