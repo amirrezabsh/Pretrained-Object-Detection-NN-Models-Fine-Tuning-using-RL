@@ -3,14 +3,14 @@
 This project explores how to fine-tune the post-processing decisions of pretrained
 object detectors via reinforcement learning. Instead of retraining YOLO weights,
 we train an RL agent (Stable-Baselines3 PPO) to adjust post-processing knobs
-(confidence threshold, NMS IoU, and max detections) on top of a frozen detector,
-maximizing IoU with ground-truth boxes.
+(confidence threshold and NMS IoU) on top of a frozen detector, maximizing IoU
+with ground-truth boxes.
 
 ## Repository Layout
 
 - `envionments/threshold_refinement.py` – Gymnasium environment that wraps a detector;
-  actions jointly adjust confidence threshold, NMS IoU, and max detections. Rewards
-  are IoU deltas with a small box-count penalty.
+  actions jointly adjust confidence threshold and NMS IoU. Rewards are IoU deltas
+  with a small box-count penalty.
 - `utility/metrics.py` – IoU helper shared between the environment and evaluation.
 - `utility/dataset.py` – Loaders for YOLO-format datasets plus a torchvision-backed
   Pascal VOC 2007 adapter with optional auto-download support.
@@ -73,12 +73,15 @@ This will:
 | `RL_LEARNING_RATE`   | PPO learning rate.                                                 |
 | `RL_EVAL_EPISODES`   | Number of evaluation rollouts to average over.                     |
 | `RL_MAX_DELTA`       | Max per-step change to the confidence threshold.                   |
-| `RL_MAX_STEPS`       | Steps per episode for threshold/NMS/max-det refinement.            |
+| `RL_MAX_STEPS`       | Steps per episode for threshold/NMS refinement.                    |
 | `RL_NMS_IOU`         | Initial NMS IoU for the detector.                                 |
 | `RL_MAX_NMS_DELTA`   | Max per-step change to NMS IoU.                                    |
-| `RL_MAX_DET`         | Initial max detections for the detector.                           |
-| `RL_MAX_DET_DELTA`   | Max per-step change to max detections.                             |
+| `RL_MAX_DET`         | Fixed max detections for the detector (not learned).               |
+| `RL_INIT_THRESH_LOW` | Initial threshold range low bound.                                |
+| `RL_INIT_THRESH_HIGH` | Initial threshold range high bound.                               |
 | `RL_BOX_COUNT_PENALTY` | Penalty weight for box count mismatch in the reward.             |
+| `RL_F_BETA`          | F-beta value for reward (beta>1 favors recall).                  |
+| `RL_FN_PENALTY`      | Penalty per missed GT (normalized by GT count).                   |
 
 If `IMAGE_DIR`/`LABEL_DIR` are provided, the loader switches from VOC to the
 custom dataset automatically.
@@ -87,8 +90,8 @@ custom dataset automatically.
 
 - `.gitignore` excludes `.env`, datasets (`data/`), checkpoints, and virtual envs.
 - The project now tunes multiple model-agnostic post-processing parameters
-  (threshold, NMS IoU, max detections). Adapters can be added to wrap other
-  detectors while keeping the same RL loop.
+  (threshold and NMS IoU). Adapters can be added to wrap other detectors while
+  keeping the same RL loop.
 
 ### macOS Metal / MPS
 
